@@ -1,0 +1,36 @@
+name: ProxySwitch
+options:
+  minimumDeploymentTarget:
+    macOS: "13.0"
+  bundleIdPrefix: com.proxy-switch
+  xcodeVersion: "15.0"
+  generateEmptyDirectories: true
+
+targets:
+  ProxySwitch:
+    type: application
+    platform: macOS
+    sources:
+      - path: ProxySwitch
+        excludes:
+          - "**/*.xcassets/AppIcon.appiconset/*.png"
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.proxy-switch.ProxySwitch
+        INFOPLIST_FILE: ProxySwitch/Info.plist
+        MACOSX_DEPLOYMENT_TARGET: "13.0"
+        SWIFT_VERSION: "5.9"
+        CODE_SIGN_IDENTITY: "-"
+        CODE_SIGN_STYLE: Automatic
+        GENERATE_INFOPLIST_FILE: false
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        ENABLE_PREVIEWS: true
+        SWIFT_EMIT_LOC_STRINGS: true
+        LD_RUNPATH_SEARCH_PATHS: "$(inherited) @executable_path/../Frameworks"
+      configs:
+        Debug:
+          CODE_SIGN_IDENTITY: "-"
+          DEVELOPMENT_TEAM: ""
+        Release:
+          CODE_SIGN_IDENTITY: "-"
+          DEVELOPMENT_TEAM: ""
