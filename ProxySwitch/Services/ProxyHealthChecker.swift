@@ -69,7 +69,7 @@ class ProxyHealthChecker {
                 Self.checkFunctional(profile: profile, testUrl: testUrl) { functional in
                     finish(latency, functional)
                 }
-            case .failed, .waiting:
+            case .failed(let error):
                 lock.lock()
                 if !completed {
                     completed = true
@@ -77,6 +77,12 @@ class ProxyHealthChecker {
                     callback(.unreachable)
                 }
                 lock.unlock()
+            case .waiting:
+                // Not yet connected — don't treat as failure
+                break
+            case .cancelled:
+                // Connection was cancelled after .ready; ignore
+                break
             default:
                 break
             }
@@ -162,8 +168,6 @@ class ProxyHealthChecker {
         let tcpStart = CFAbsoluteTimeGetCurrent()
         let connection = NWConnection(host: NWEndpoint.Host(profile.host), port: nwPort, using: .tcp)
         currentConnection = connection
-        var phase1Done = false
-        let lock = NSLock()
 
         connection.stateUpdateHandler = { [weak self] state in
             guard let self, generation == self.checkGeneration else { return }
@@ -171,24 +175,23 @@ class ProxyHealthChecker {
             switch state {
             case .ready:
                 let latency = Int((CFAbsoluteTimeGetCurrent() - tcpStart) * 1000)
-                connection.cancel()
-                lock.lock()
-                phase1Done = true
-                lock.unlock()
                 // Phase 2: HTTP through proxy
                 Self.checkFunctional(profile: profile, testUrl: self.testUrl) { functional in
                     guard generation == self.checkGeneration else { return }
                     self.timeoutWork?.cancel()
                     self.onStatusChange?(.reachable(ms: latency, functional: functional))
                 }
-            case .failed, .waiting:
+            case .failed:
                 connection.cancel()
-                lock.lock()
-                let already = phase1Done
-                lock.unlock()
-                guard !already, generation == self.checkGeneration else { return }
+                guard generation == self.checkGeneration else { return }
                 self.timeoutWork?.cancel()
                 self.onStatusChange?(.unreachable)
+            case .waiting:
+                // Not yet connected — don't treat as failure
+                break
+            case .cancelled:
+                // Connection was cancelled after .ready; ignore
+                break
             default:
                 break
             }
@@ -199,10 +202,6 @@ class ProxyHealthChecker {
         // 5-second TCP timeout
         let work = DispatchWorkItem { [weak self] in
             guard let self, generation == self.checkGeneration else { return }
-            lock.lock()
-            let already = phase1Done
-            lock.unlock()
-            guard !already else { return }
             self.currentConnection?.cancel()
             self.onStatusChange?(.unreachable)
         }
