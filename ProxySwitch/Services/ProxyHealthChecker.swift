@@ -41,7 +41,7 @@ class ProxyHealthChecker {
     ///   Phase 2 — HEAD request through proxy to testUrl → checks functionality.
     static func checkOnce(profile: ProxyProfile, testUrl: String, callback: @escaping (ProxyHealth) -> Void) {
         // Phase 1: TCP connect to proxy
-        let port = profile.socksPort ?? profile.httpPort
+        let port = profile.type == .socks5 ? (profile.socksPort ?? profile.httpPort) : profile.httpPort
         guard let nwPort = NWEndpoint.Port(rawValue: UInt16(port)) else {
             callback(.unreachable)
             return
@@ -153,7 +153,7 @@ class ProxyHealthChecker {
         onStatusChange?(.checking)
 
         // Phase 1: TCP connect to proxy
-        let port = profile.socksPort ?? profile.httpPort
+        let port = profile.type == .socks5 ? (profile.socksPort ?? profile.httpPort) : profile.httpPort
         guard let nwPort = NWEndpoint.Port(rawValue: UInt16(port)) else {
             onStatusChange?(.unreachable)
             return
