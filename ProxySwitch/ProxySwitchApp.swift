@@ -83,6 +83,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         menu.addItem(.separator())
         menu.addItem(withTitle: "设置...", action: #selector(openSettings), keyEquivalent: ",")
         menu.addItem(.separator())
+        let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "?"
+        menu.addItem(withTitle: "v\(version)", action: nil, keyEquivalent: "")
         menu.addItem(withTitle: "退出 ProxySwitch", action: #selector(quitApp), keyEquivalent: "q")
 
         guard let button = statusItem.button else { return }
