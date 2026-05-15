@@ -138,7 +138,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private func showSettingsWindow() {
         if settingsWindow == nil {
             let hostingView = NSHostingView(rootView: SettingsView())
-            hostingView.frame = NSRect(x: 0, y: 0, width: 450, height: 320)
+            hostingView.frame = NSRect(x: 0, y: 0, width: 450, height: 350)
 
             let window = NSWindow(
                 contentRect: hostingView.frame,

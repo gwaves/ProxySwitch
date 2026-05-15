@@ -107,6 +107,8 @@ struct PopoverView: View {
                             appState.activateProfile(profile)
                         }
                         .contextMenu {
+                            Button("测速") { appState.recheckProfile(profile) }
+                            Divider()
                             Button("编辑") { editingProfile = profile }
                             Divider()
                             Button("删除", role: .destructive) { appState.deleteProfile(profile) }

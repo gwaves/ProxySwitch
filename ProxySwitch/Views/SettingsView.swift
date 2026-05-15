@@ -10,6 +10,7 @@ struct SettingsView: View {
     @AppStorage("launchAtLogin") private var launchAtLogin = false
     @AppStorage("healthCheckEnabled") private var healthCheckEnabled = true
     @AppStorage("healthCheckInterval") private var healthCheckInterval = 30.0
+    @AppStorage("proxyTestUrl") private var proxyTestUrl = "https://www.google.com"
     @AppStorage("shellConfigPath") private var shellConfigPath = ""
 
     var body: some View {
@@ -23,7 +24,7 @@ struct SettingsView: View {
             terminalTab
                 .tabItem { Label("终端", systemImage: "terminal") }
         }
-        .frame(width: 450, height: 320)
+        .frame(width: 450, height: 350)
     }
 
     // MARK: General Tab
@@ -62,6 +63,8 @@ struct SettingsView: View {
                     Text("120 秒").tag(120.0)
                 }
             }
+
+            TextField("测试目标 URL", text: $proxyTestUrl, prompt: Text("https://www.google.com"))
         }
         .formStyle(.grouped)
         .padding()

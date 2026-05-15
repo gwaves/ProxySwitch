@@ -1,17 +1,15 @@
 import Foundation
-import Network
 
 // MARK: - Proxy Health Checker
 
-/// Performs TCP connectivity checks against a proxy host:port.
-/// Uses a generation counter to invalidate stale in-flight checks
-/// (e.g. when a new check starts or the target changes).
+/// Tests proxy availability by making an HTTP request through the proxy
+/// to a configurable test URL. Uses URLSession with proxy configuration
+/// and a generation counter to invalidate stale in-flight checks.
 class ProxyHealthChecker {
     private var timer: Timer?
-    private var targetHost: String = ""
-    private var targetPort: Int = 0
-    private var currentConnection: NWConnection?
+    private var targetProfile: ProxyProfile?
     private var checkGeneration: UInt64 = 0
+    private var currentTask: URLSessionDataTask?
     private var timeoutWork: DispatchWorkItem?
 
     var onStatusChange: ((ProxyHealth) -> Void)?
@@ -22,62 +20,50 @@ class ProxyHealthChecker {
 
     deinit {
         timer?.invalidate()
-        currentConnection?.cancel()
+        currentTask?.cancel()
         timeoutWork?.cancel()
     }
 
-    /// Updates the target and triggers an immediate check.
-    func updateTarget(host: String, port: Int) {
-        targetHost = host
-        targetPort = port
+    /// Updates the target profile and triggers an immediate check.
+    func updateTarget(profile: ProxyProfile) {
+        targetProfile = profile
         checkNow()
     }
 
     // MARK: One-shot Check (Static)
 
-    /// Performs a single TCP connectivity check without needing a timer.
-    /// Used for batch profile checks on startup and after add/edit.
-    static func checkOnce(host: String, port: Int, callback: @escaping (ProxyHealth) -> Void) {
-        guard let nwPort = NWEndpoint.Port(rawValue: UInt16(port)) else {
+    /// Tests proxy availability by sending a HEAD request through the proxy
+    /// to the given test URL. Any HTTP response (even non-200) means the proxy
+    /// forwarded the request successfully.
+    static func checkOnce(profile: ProxyProfile, testUrl: String, callback: @escaping (ProxyHealth) -> Void) {
+        guard let url = URL(string: testUrl) else {
             callback(.unreachable)
             return
         }
 
         let startTime = CFAbsoluteTimeGetCurrent()
-        let connection = NWConnection(host: NWEndpoint.Host(host), port: nwPort, using: .tcp)
-        var completed = false
-        let lock = NSLock()
+        let config = URLSessionConfiguration.ephemeral.copy() as! URLSessionConfiguration
+        config.timeoutIntervalForRequest = 5
+        config.timeoutIntervalForResource = 5
+        Self.configureProxy(config: config, profile: profile)
 
-        let finish: (ProxyHealth) -> Void = { health in
-            lock.lock()
-            defer { lock.unlock() }
-            guard !completed else { return }
-            completed = true
-            connection.cancel()
-            callback(health)
-        }
+        let session = URLSession(configuration: config)
+        var request = URLRequest(url: url)
+        request.httpMethod = "HEAD"
 
-        connection.stateUpdateHandler = { state in
-            switch state {
-            case .ready:
-                let elapsed = Int((CFAbsoluteTimeGetCurrent() - startTime) * 1000)
-                finish(.reachable(ms: elapsed))
-            case .failed:
-                finish(.unreachable)
-            case .waiting(let error):
-                if error == .posix(.EHOSTUNREACH) || error == .posix(.ETIMEDOUT) || error == .posix(.ECONNREFUSED) {
-                    finish(.unreachable)
-                }
-            default: break
+        let task = session.dataTask(with: request) { _, response, error in
+            let elapsed = Int((CFAbsoluteTimeGetCurrent() - startTime) * 1000)
+            if error != nil {
+                callback(.unreachable)
+            } else if response is HTTPURLResponse {
+                // Any HTTP response means the proxy is functional
+                callback(.reachable(ms: elapsed))
+            } else {
+                callback(.unreachable)
             }
+            session.invalidateAndCancel()
         }
-
-        connection.start(queue: .global(qos: .utility))
-
-        // 5-second timeout
-        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 5) {
-            finish(.unreachable)
-        }
+        task.resume()
     }
 
     // MARK: Periodic Checking
@@ -91,79 +77,84 @@ class ProxyHealthChecker {
 
     // MARK: Single Check Cycle
 
-    /// Runs one connectivity check. Increments `checkGeneration` so any
+    /// Runs one proxy availability check. Increments `checkGeneration` so any
     /// in-flight handler from a previous check is silently discarded.
     private func checkNow() {
-        guard !targetHost.isEmpty, targetPort > 0 else { return }
+        guard let profile = targetProfile else { return }
 
         checkGeneration &+= 1
         let generation = checkGeneration
 
-        currentConnection?.cancel()
-        currentConnection = nil
+        currentTask?.cancel()
+        currentTask = nil
         timeoutWork?.cancel()
         timeoutWork = nil
 
         onStatusChange?(.checking)
 
-        let host = targetHost
-        let port = UInt16(targetPort)
-        let startTime = CFAbsoluteTimeGetCurrent()
+        let testUrl = UserDefaults.standard.string(forKey: "proxyTestUrl") ?? "https://www.google.com"
 
-        guard let nwPort = NWEndpoint.Port(rawValue: port) else {
+        guard let url = URL(string: testUrl) else {
             onStatusChange?(.unreachable)
             return
         }
 
-        let connection = NWConnection(
-            host: NWEndpoint.Host(host),
-            port: nwPort,
-            using: .tcp
-        )
-        currentConnection = connection
+        let startTime = CFAbsoluteTimeGetCurrent()
+        let config = URLSessionConfiguration.ephemeral.copy() as! URLSessionConfiguration
+        config.timeoutIntervalForRequest = 5
+        config.timeoutIntervalForResource = 5
+        Self.configureProxy(config: config, profile: profile)
 
-        connection.stateUpdateHandler = { [weak self] state in
+        let session = URLSession(configuration: config)
+        var request = URLRequest(url: url)
+        request.httpMethod = "HEAD"
+
+        let task = session.dataTask(with: request) { [weak self] _, response, error in
             guard let self else { return }
             guard generation == self.checkGeneration else { return }
 
-            switch state {
-            case .ready:
-                let elapsed = Int((CFAbsoluteTimeGetCurrent() - startTime) * 1000)
-                connection.cancel()
-                self.timeoutWork?.cancel()
-                self.onStatusChange?(.reachable(ms: elapsed))
-
-            case .failed:
-                connection.cancel()
-                self.timeoutWork?.cancel()
+            let elapsed = Int((CFAbsoluteTimeGetCurrent() - startTime) * 1000)
+            if error != nil {
                 self.onStatusChange?(.unreachable)
-
-            case .waiting(let error):
-                if error == .posix(.EHOSTUNREACH)
-                    || error == .posix(.ETIMEDOUT)
-                    || error == .posix(.ECONNREFUSED) {
-                    connection.cancel()
-                    self.timeoutWork?.cancel()
-                    self.onStatusChange?(.unreachable)
-                }
-
-            case .cancelled:
-                break
-
-            default:
-                break
+            } else if response is HTTPURLResponse {
+                self.onStatusChange?(.reachable(ms: elapsed))
+            } else {
+                self.onStatusChange?(.unreachable)
             }
+            session.invalidateAndCancel()
         }
+        currentTask = task
+        task.resume()
 
-        connection.start(queue: .global(qos: .utility))
-
-        // 5-second timeout
+        // 10-second hard timeout (beyond URLSession's own timeout)
         let work = DispatchWorkItem { [weak self] in
             guard let self, generation == self.checkGeneration else { return }
-            self.currentConnection?.cancel()
+            self.currentTask?.cancel()
             self.onStatusChange?(.unreachable)
         }
         timeoutWork = work
-        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 5, execute: work)
+        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 10, execute: work)
+    }
+
+    // MARK: Proxy Configuration
+
+    /// Configures URLSession proxy settings based on the profile type.
+    private static func configureProxy(config: URLSessionConfiguration, profile: ProxyProfile) {
+        switch profile.type {
+        case .http:
+            config.connectionProxyDictionary = [
+                kCFStreamPropertyHTTPProxyHost as String: profile.host,
+                kCFStreamPropertyHTTPProxyPort as String: profile.httpPort,
+                kCFStreamPropertyHTTPSProxyHost as String: profile.host,
+                kCFStreamPropertyHTTPSProxyPort as String: profile.httpPort,
+            ]
+        case .socks5:
+            let port = profile.socksPort ?? profile.httpPort
+            config.connectionProxyDictionary = [
+                kCFStreamPropertySOCKSProxyHost as String: profile.host,
+                kCFStreamPropertySOCKSProxyPort as String: port,
+                kCFStreamPropertySOCKSVersion as String: 5,
+            ]
+        }
     }
 }

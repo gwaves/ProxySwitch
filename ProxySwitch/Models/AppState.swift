@@ -4,7 +4,7 @@ import Combine
 // MARK: - Health Status
 
 /// Represents the connectivity state of a proxy endpoint.
-/// `.reachable(ms:)` carries the TCP handshake latency in milliseconds.
+/// `.reachable(ms:)` carries the HTTP request latency in milliseconds.
 enum ProxyHealth: Equatable {
     case unknown
     case checking
@@ -132,7 +132,7 @@ class AppState: ObservableObject {
         }
 
         // Point the periodic checker at the new target.
-        healthChecker?.updateTarget(host: profile.host, port: profile.httpPort)
+        healthChecker?.updateTarget(profile: profile)
     }
 
     // MARK: Batch Health Check
@@ -144,12 +144,14 @@ class AppState: ObservableObject {
         }
     }
 
-    /// Checks a single profile's connectivity using the shared one-shot method.
+    /// Checks a single profile's connectivity by sending an HTTP request through it.
     private func checkProfileHealth(_ profile: ProxyProfile) {
         let id = profile.id
         profileHealths[id] = .checking
 
-        ProxyHealthChecker.checkOnce(host: profile.host, port: profile.httpPort) { [weak self] health in
+        let testUrl = UserDefaults.standard.string(forKey: "proxyTestUrl") ?? "https://www.google.com"
+
+        ProxyHealthChecker.checkOnce(profile: profile, testUrl: testUrl) { [weak self] health in
             Task { @MainActor in
                 self?.profileHealths[id] = health
                 // Keep the active-profile health in sync for the menu bar icon.
@@ -158,6 +160,11 @@ class AppState: ObservableObject {
                 }
             }
         }
+    }
+
+    /// Re-checks a single profile's connectivity (triggered from context menu).
+    func recheckProfile(_ profile: ProxyProfile) {
+        checkProfileHealth(profile)
     }
 
     // MARK: Proxy Toggles
