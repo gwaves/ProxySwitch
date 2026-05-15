@@ -4,11 +4,12 @@ import Combine
 // MARK: - Health Status
 
 /// Represents the connectivity state of a proxy endpoint.
-/// `.reachable(ms:)` carries the HTTP request latency in milliseconds.
+/// `.reachable(ms:, functional:)` carries the TCP connection latency to the proxy
+/// and whether the test URL is reachable through it.
 enum ProxyHealth: Equatable {
     case unknown
     case checking
-    case reachable(ms: Int)
+    case reachable(ms: Int, functional: Bool)
     case unreachable
 }
 
@@ -51,7 +52,8 @@ class AppState: ObservableObject {
 
     /// SF Symbol name for the menu bar icon.
     var menuBarIconName: String {
-        if proxyHealth == .unreachable { return "globe.badge" }
+        if case .unreachable = proxyHealth { return "globe.badge" }
+        if case .reachable(_, functional: false) = proxyHealth { return "globe.badge" }
         return "globe"
     }
 
@@ -60,7 +62,8 @@ class AppState: ObservableObject {
         switch proxyHealth {
         case .unknown, .checking:
             return nil
-        case .reachable:
+        case .reachable(_, let functional):
+            guard functional else { return NSColor.systemOrange }
             return systemProxyEnabled || terminalProxyEnabled
                 ? NSColor.systemGreen : nil
         case .unreachable:

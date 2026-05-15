@@ -58,9 +58,9 @@ struct ProfileRow: View {
                         .fill(.gray)
                         .frame(width: 8, height: 8)
                 }
-            case .reachable:
+            case .reachable(_, let functional):
                 Circle()
-                    .fill(isActive ? .green : .green.opacity(0.6))
+                    .fill(dotColor(functional: functional))
                     .frame(width: 8, height: 8)
             case .unreachable:
                 Circle()
@@ -70,17 +70,27 @@ struct ProfileRow: View {
         }
     }
 
+    private func dotColor(functional: Bool) -> Color {
+        let base: Color = functional ? .green : .orange
+        return isActive ? base : base.opacity(0.6)
+    }
+
     // MARK: Health Badge
 
-    /// Text label next to the address showing latency or error state.
+    /// Shows proxy latency (ms) and a functional checkmark / cross.
     /// Latency is color-coded: green < 100ms, orange < 300ms, red >= 300ms.
     private var healthBadge: some View {
         Group {
             switch health {
-            case .reachable(let ms):
-                Text("\(ms)ms")
-                    .font(.caption2)
-                    .foregroundColor(ms < 100 ? .green : ms < 300 ? .orange : .red)
+            case .reachable(let ms, let functional):
+                HStack(spacing: 2) {
+                    Text("\(ms)ms")
+                        .font(.caption2)
+                        .foregroundColor(ms < 100 ? .green : ms < 300 ? .orange : .red)
+                    Image(systemName: functional ? "checkmark.circle.fill" : "xmark.circle.fill")
+                        .font(.caption2)
+                        .foregroundColor(functional ? .green : .orange)
+                }
             case .unreachable:
                 Text("不可达")
                     .font(.caption2)
