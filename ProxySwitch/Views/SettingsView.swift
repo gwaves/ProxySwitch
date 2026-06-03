@@ -11,6 +11,7 @@ struct SettingsView: View {
     @AppStorage("healthCheckEnabled") private var healthCheckEnabled = true
     @AppStorage("healthCheckInterval") private var healthCheckInterval = 30.0
     @AppStorage("proxyTestUrl") private var proxyTestUrl = "https://www.google.com"
+    @AppStorage("autoDisableWhenAllUnreachable") private var autoDisableWhenAllUnreachable = false
     @AppStorage("shellConfigPath") private var shellConfigPath = ""
 
     var body: some View {
@@ -62,6 +63,8 @@ struct SettingsView: View {
                     Text("60 秒").tag(60.0)
                     Text("120 秒").tag(120.0)
                 }
+
+                Toggle("所有代理不可用时自动关闭代理", isOn: $autoDisableWhenAllUnreachable)
             }
 
             TextField("测试目标 URL", text: $proxyTestUrl, prompt: Text("https://www.google.com"))

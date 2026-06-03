@@ -86,6 +86,7 @@ class AppState: ObservableObject {
         setupHealthChecker()
         // Check all profiles on launch so each row shows its health immediately.
         checkAllProfiles()
+        observeProfileHealths()
     }
 
     // MARK: State Restoration
@@ -110,7 +111,43 @@ class AppState: ObservableObject {
         healthChecker?.onStatusChange = { [weak self] health in
             Task { @MainActor in
                 self?.proxyHealth = health
+                if let activeId = self?.activeProfileId {
+                    self?.profileHealths[activeId] = health
+                }
+                // If the active profile becomes unreachable, re-check all profiles
+                // so we can determine whether every proxy is down.
+                if case .unreachable = health {
+                    self?.checkAllProfiles()
+                }
             }
+        }
+    }
+
+    // MARK: Auto Disable
+
+    /// Monitors `profileHealths` and disables all proxies when every configured proxy is unreachable.
+    private func observeProfileHealths() {
+        $profileHealths
+            .sink { [weak self] _ in
+                self?.evaluateAutoDisable()
+            }
+            .store(in: &cancellables)
+    }
+
+    private func evaluateAutoDisable() {
+        guard UserDefaults.standard.bool(forKey: "autoDisableWhenAllUnreachable") else { return }
+        guard !profiles.isEmpty else { return }
+        guard systemProxyEnabled || terminalProxyEnabled else { return }
+
+        let allUnreachable = profiles.allSatisfy { profile in
+            if let health = profileHealths[profile.id] {
+                return health == .unreachable
+            }
+            return false
+        }
+
+        if allUnreachable {
+            disableAll()
         }
     }
 
