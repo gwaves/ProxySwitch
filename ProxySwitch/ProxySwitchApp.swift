@@ -167,6 +167,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     /// unless the user explicitly opted in via "showInDock".
     func windowWillClose(_ notification: Notification) {
         guard let window = notification.object as? NSWindow, window == settingsWindow else { return }
+        settingsWindow = nil
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
             if !UserDefaults.standard.bool(forKey: "showInDock") {
                 NSApp.setActivationPolicy(.accessory)
