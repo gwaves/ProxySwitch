@@ -6,7 +6,6 @@ import ServiceManagement
 /// Multi-tab settings window with General, Proxy Check, and Terminal tabs.
 /// Uses `@AppStorage` for persistence so changes are saved automatically.
 struct SettingsView: View {
-    @AppStorage("showInDock") private var showInDock = false
     @AppStorage("launchAtLogin") private var launchAtLogin = false
     @AppStorage("healthCheckEnabled") private var healthCheckEnabled = true
     @AppStorage("healthCheckInterval") private var healthCheckInterval = 30.0
@@ -35,15 +34,6 @@ struct SettingsView: View {
             Toggle("开机自启", isOn: $launchAtLogin)
                 .onChange(of: launchAtLogin) { newValue in
                     setLaunchAtLogin(newValue)
-                }
-
-            Toggle("在 Dock 显示图标", isOn: $showInDock)
-                .onChange(of: showInDock) { newValue in
-                    if newValue {
-                        NSApp.setActivationPolicy(.regular)
-                    } else {
-                        NSApp.setActivationPolicy(.accessory)
-                    }
                 }
         }
         .formStyle(.grouped)

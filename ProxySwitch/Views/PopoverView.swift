@@ -13,6 +13,7 @@ struct PopoverView: View {
         VStack(spacing: 0) {
             header
             Divider()
+            trafficSection
             toggleSection
             Divider()
             profileList
@@ -56,6 +57,32 @@ struct PopoverView: View {
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 10)
+    }
+
+    // MARK: Traffic Section
+
+    @ViewBuilder
+    private var trafficSection: some View {
+        let anyProxyEnabled = appState.systemProxyEnabled || appState.terminalProxyEnabled
+        if anyProxyEnabled {
+            HStack {
+                Image(systemName: "arrow.down.arrow.up")
+                    .foregroundColor(.secondary)
+                    .font(.caption)
+                if let speed = appState.trafficSpeed, speed > 0 {
+                    Text(speed.trafficFullString)
+                        .font(.system(.caption, design: .monospaced))
+                        .foregroundColor(.primary)
+                } else {
+                    Text("暂无流量")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+                Spacer()
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 6)
+        }
     }
 
     // MARK: Toggle Section

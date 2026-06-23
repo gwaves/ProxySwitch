@@ -39,6 +39,10 @@ class AppState: ObservableObject {
     /// Health of the *active* profile (drives the menu bar icon).
     @Published var proxyHealth: ProxyHealth = .unknown
 
+    /// Current real-time traffic speed through the active proxy (bytes/second).
+    /// `nil` when no proxy is active or traffic cannot be measured.
+    @Published var trafficSpeed: Double?
+
     /// Per-profile health map. Populated on startup and on add/edit.
     @Published var profileHealths: [UUID: ProxyHealth] = [:]
 
@@ -77,16 +81,28 @@ class AppState: ObservableObject {
     private let terminalProxyManager = TerminalProxyManager()
     /// Periodic checker for the active profile only.
     private var healthChecker: ProxyHealthChecker?
+    /// Real-time traffic monitor for the active proxy port.
+    private var trafficMonitor: ProxyTrafficMonitor?
     private var cancellables = Set<AnyCancellable>()
+
+    // MARK: Auto-disable / auto-re-enable tracking
+
+    /// `true` if the last proxy disable was triggered automatically because every profile was unreachable.
+    private var wasAutoDisabled = false
+    /// Which proxy channels were enabled before the automatic disable, so we can restore them on recovery.
+    private var autoDisabledSystemProxy = false
+    private var autoDisabledTerminalProxy = false
 
     // MARK: Init
 
     init() {
         loadState()
         setupHealthChecker()
+        setupTrafficMonitor()
         // Check all profiles on launch so each row shows its health immediately.
         checkAllProfiles()
         observeProfileHealths()
+        observeProxyHealthForAutoReenable()
     }
 
     // MARK: State Restoration
@@ -123,6 +139,31 @@ class AppState: ObservableObject {
         }
     }
 
+    // MARK: Traffic Monitor
+
+    /// Sets up the real-time traffic monitor for the active proxy port.
+    private func setupTrafficMonitor() {
+        trafficMonitor = ProxyTrafficMonitor(interval: 3)
+        trafficMonitor?.onSpeedUpdate = { [weak self] speed in
+            Task { @MainActor in
+                self?.trafficSpeed = speed
+            }
+        }
+        // Start monitoring if a profile is already active and proxy is enabled.
+        updateTrafficMonitorTarget()
+    }
+
+    /// Starts or stops traffic monitoring based on whether any proxy is enabled.
+    private func updateTrafficMonitorTarget() {
+        let anyProxyEnabled = systemProxyEnabled || terminalProxyEnabled
+        if anyProxyEnabled, let profile = activeProfile {
+            trafficMonitor?.updateTarget(profile: profile)
+        } else {
+            trafficMonitor?.updateTarget(profile: nil)
+            trafficSpeed = nil
+        }
+    }
+
     // MARK: Auto Disable
 
     /// Monitors `profileHealths` and disables all proxies when every configured proxy is unreachable.
@@ -147,14 +188,54 @@ class AppState: ObservableObject {
         }
 
         if allUnreachable {
-            disableAll()
+            autoDisabledSystemProxy = systemProxyEnabled
+            autoDisabledTerminalProxy = terminalProxyEnabled
+            wasAutoDisabled = true
+            disableAll(isAutomatic: true)
         }
+    }
+
+    // MARK: Auto Re-enable
+
+    /// Watches the active profile's health and re-enables proxies that were automatically disabled
+    /// once connectivity is restored.
+    private func observeProxyHealthForAutoReenable() {
+        $proxyHealth
+            .sink { [weak self] health in
+                self?.evaluateAutoReenable(health: health)
+            }
+            .store(in: &cancellables)
+    }
+
+    private func evaluateAutoReenable(health: ProxyHealth) {
+        guard wasAutoDisabled else { return }
+        guard case .reachable(_, let functional) = health, functional else { return }
+        guard activeProfile != nil else { return }
+
+        if autoDisabledSystemProxy && !systemProxyEnabled {
+            setSystemProxy(true)
+        }
+        if autoDisabledTerminalProxy && !terminalProxyEnabled {
+            setTerminalProxy(true)
+        }
+
+        wasAutoDisabled = false
+        autoDisabledSystemProxy = false
+        autoDisabledTerminalProxy = false
+    }
+
+    /// Clears auto-disable tracking so a subsequent manual user action does not trigger auto-re-enable.
+    private func clearAutoDisableTracking() {
+        wasAutoDisabled = false
+        autoDisabledSystemProxy = false
+        autoDisabledTerminalProxy = false
     }
 
     // MARK: Profile Activation
 
     /// Switches the active profile and applies it to any enabled proxy channels.
     func activateProfile(_ profile: ProxyProfile) {
+        clearAutoDisableTracking()
         activeProfileId = profile.id
 
         // Snapshot the toggles before dispatching to a background thread.
@@ -173,6 +254,8 @@ class AppState: ObservableObject {
 
         // Point the periodic checker at the new target.
         healthChecker?.updateTarget(profile: profile)
+        // Update traffic monitor target as well.
+        updateTrafficMonitorTarget()
     }
 
     // MARK: Batch Health Check
@@ -210,8 +293,12 @@ class AppState: ObservableObject {
     // MARK: Proxy Toggles
 
     /// Enables or disables the macOS system proxy (HTTP/HTTPS/SOCKS) via `networksetup`.
-    func setSystemProxy(_ enabled: Bool) {
+    func setSystemProxy(_ enabled: Bool, isAutomatic: Bool = false) {
+        if !isAutomatic {
+            clearAutoDisableTracking()
+        }
         systemProxyEnabled = enabled
+        updateTrafficMonitorTarget()
         guard let profile = activeProfile else { return }
 
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
@@ -225,8 +312,12 @@ class AppState: ObservableObject {
     }
 
     /// Enables or disables terminal proxy env vars in the shell config file.
-    func setTerminalProxy(_ enabled: Bool) {
+    func setTerminalProxy(_ enabled: Bool, isAutomatic: Bool = false) {
+        if !isAutomatic {
+            clearAutoDisableTracking()
+        }
         terminalProxyEnabled = enabled
+        updateTrafficMonitorTarget()
         guard let profile = activeProfile else { return }
 
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
@@ -240,13 +331,17 @@ class AppState: ObservableObject {
     }
 
     func enableAll() {
+        clearAutoDisableTracking()
         setSystemProxy(true)
         setTerminalProxy(true)
     }
 
-    func disableAll() {
-        setSystemProxy(false)
-        setTerminalProxy(false)
+    func disableAll(isAutomatic: Bool = false) {
+        if !isAutomatic {
+            clearAutoDisableTracking()
+        }
+        setSystemProxy(false, isAutomatic: isAutomatic)
+        setTerminalProxy(false, isAutomatic: isAutomatic)
     }
 
     // MARK: Profile CRUD

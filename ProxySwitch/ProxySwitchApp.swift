@@ -1,4 +1,5 @@
 import SwiftUI
+import Combine
 
 // MARK: - App Entry Point
 
@@ -18,11 +19,16 @@ struct ProxySwitchApp: App {
 // MARK: - App Delegate
 
 /// Manages the status bar item, popover, and settings window lifecycle.
-class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
-    let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
+class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSPopoverDelegate {
+    let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
     let popover = NSPopover()
     let appState = AppState.shared
     var settingsWindow: NSWindow?
+    private var speedCancellable: AnyCancellable?
+    private var menuBarCancellables = Set<AnyCancellable>()
+    private var lastMenuBarSymbol: String?
+    private var lastMenuBarColor: NSColor?
+    private var globalEventMonitor: Any?
 
     // MARK: Launch
 
@@ -30,6 +36,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         setupMenuBar()
         setupPopover()
         configureAppAppearance()
+        observeTrafficSpeed()
         NotificationCenter.default.addObserver(
             self,
             selector: #selector(handleOpenSettings),
@@ -48,19 +55,140 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             button.target = self
             // Handle both left-click (popover) and right-click (context menu)
             button.sendAction(on: [.leftMouseUp, .rightMouseUp])
+            updateMenuBarAppearance()
         }
+    }
+
+    /// Updates the menu bar icon image, color, and title based on current state.
+    /// Uses caching to avoid redundant updates that can trigger AppKit layout animations.
+    private func updateMenuBarAppearance() {
+        guard let button = statusItem.button else { return }
+
+        let symbolName = appState.menuBarIconName
+        let color = appState.menuBarIconColor
+        let anyProxyEnabled = appState.systemProxyEnabled || appState.terminalProxyEnabled
+        let newTitle: String
+        if anyProxyEnabled, let speed = appState.trafficSpeed, speed > 0 {
+            newTitle = " " + speed.trafficMenuBarString
+        } else {
+            newTitle = ""
+        }
+
+        // Only mutate UI if something actually changed — avoids AppKit animation crashes.
+        let currentTitle = button.title
+        let needsImageUpdate = !imageMatches(symbolName: symbolName, color: color)
+        let needsTitleUpdate = currentTitle != newTitle
+
+        guard needsImageUpdate || needsTitleUpdate else { return }
+
+        // Disable implicit animations during the update.
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+
+        if needsImageUpdate {
+            var image = NSImage(systemSymbolName: symbolName, accessibilityDescription: "ProxySwitch")
+            image?.size = NSSize(width: 18, height: 18)
+            if let color = color {
+                image = image?.withSymbolConfiguration(
+                    NSImage.SymbolConfiguration(paletteColors: [color])
+                )
+            }
+            button.image = image
+            lastMenuBarSymbol = symbolName
+            lastMenuBarColor = color
+        }
+
+        if needsTitleUpdate {
+            button.title = newTitle
+        }
+
+        CATransaction.commit()
+    }
+
+    /// Checks whether the current button image matches the desired symbol and color.
+    private func imageMatches(symbolName: String, color: NSColor?) -> Bool {
+        let colorChanged = (lastMenuBarColor == nil && color != nil)
+            || (lastMenuBarColor != nil && color == nil)
+            || (lastMenuBarColor != nil && color != nil && !lastMenuBarColor!.isEqual(color!))
+        guard lastMenuBarSymbol == symbolName, !colorChanged else { return false }
+        return true
+    }
+
+    // MARK: Traffic Speed Observation
+
+    private func observeTrafficSpeed() {
+        // Listen to traffic speed changes
+        speedCancellable = appState.$trafficSpeed
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in
+                self?.updateMenuBarAppearance()
+            }
+
+        // Also update appearance when proxy health or enabled state changes (affects icon color)
+        appState.$proxyHealth
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in
+                self?.updateMenuBarAppearance()
+            }
+            .store(in: &menuBarCancellables)
+
+        appState.$systemProxyEnabled
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in
+                self?.updateMenuBarAppearance()
+            }
+            .store(in: &menuBarCancellables)
+
+        appState.$terminalProxyEnabled
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in
+                self?.updateMenuBarAppearance()
+            }
+            .store(in: &menuBarCancellables)
     }
 
     // MARK: Popover
 
     private func setupPopover() {
         popover.behavior = .transient
+        popover.delegate = self
         popover.contentViewController = NSViewController()
         popover.contentViewController?.view = NSHostingView(
             rootView: PopoverView()
                 .environmentObject(appState)
         )
         popover.contentViewController?.view.frame = NSSize(width: 280, height: 400).toCGRect()
+    }
+
+    // MARK: NSPopoverDelegate
+
+    func popoverDidShow(_ notification: Notification) {
+        startGlobalEventMonitor()
+    }
+
+    func popoverDidClose(_ notification: Notification) {
+        stopGlobalEventMonitor()
+    }
+
+    /// Closes the popover when the user clicks outside of it (including on other apps' windows).
+    /// Clicks on the status bar item are ignored so that `statusBarClicked` can toggle the popover.
+    private func startGlobalEventMonitor() {
+        stopGlobalEventMonitor()
+        globalEventMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] _ in
+            guard let self = self, self.popover.isShown else { return }
+            if let statusWindow = self.statusItem.button?.window,
+               statusWindow.frame.contains(NSEvent.mouseLocation) {
+                return
+            }
+            self.closePopover()
+        }
+    }
+
+    private func stopGlobalEventMonitor() {
+        if let monitor = globalEventMonitor {
+            NSEvent.removeMonitor(monitor)
+            globalEventMonitor = nil
+        }
     }
 
     // MARK: Click Handling
@@ -97,6 +225,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             popover.performClose(nil)
         } else {
             if let button = statusItem.button {
+                // Activate the app so a .transient popover closes reliably when
+                // the user clicks another window.
+                NSApp.activate(ignoringOtherApps: true)
                 popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
             }
         }
@@ -163,15 +294,12 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     // MARK: NSWindowDelegate
 
-    /// Revert to `.accessory` (no Dock icon) when settings window closes,
-    /// unless the user explicitly opted in via "showInDock".
+    /// Revert to `.accessory` (no Dock icon) when the settings window closes.
     func windowWillClose(_ notification: Notification) {
         guard let window = notification.object as? NSWindow, window == settingsWindow else { return }
         settingsWindow = nil
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-            if !UserDefaults.standard.bool(forKey: "showInDock") {
-                NSApp.setActivationPolicy(.accessory)
-            }
+            NSApp.setActivationPolicy(.accessory)
         }
     }
 
@@ -183,15 +311,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     // MARK: Appearance
 
-    /// Reads the "showInDock" preference and sets the initial activation policy.
+    /// The app is a menu-bar-only utility; keep it at `.accessory` (no Dock icon).
     private func configureAppAppearance() {
-        UserDefaults.standard.register(defaults: ["showInDock": false])
-        let showInDock = UserDefaults.standard.bool(forKey: "showInDock")
-        if showInDock {
-            NSApp.setActivationPolicy(.regular)
-        } else {
-            NSApp.setActivationPolicy(.accessory)
-        }
+        NSApp.setActivationPolicy(.accessory)
     }
 }
 
