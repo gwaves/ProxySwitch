@@ -33,6 +33,19 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSPopoverD
     // MARK: Launch
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // Single-instance guard: on macOS 26+ the scene-backed status item can
+        // crash (over-release inside AppKit) when a second instance of the same
+        // app registers its status item while another instance is still alive.
+        // An flock lock survives forks (the status-item scene child inherits the
+        // open file description), so it won't false-trigger on that child.
+        if !acquireInstanceLock() {
+            NSRunningApplication.runningApplications(withBundleIdentifier: Bundle.main.bundleIdentifier ?? "")
+                .first { $0.processIdentifier != ProcessInfo.processInfo.processIdentifier }?
+                .activate(options: [.activateIgnoringOtherApps])
+            NSApp.terminate(nil)
+            return
+        }
+
         setupMenuBar()
         setupPopover()
         configureAppAppearance()
@@ -43,6 +56,17 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSPopoverD
             name: .openSettings,
             object: nil
         )
+    }
+
+    /// Acquires the single-instance lock. Returns false if another live
+    /// instance already holds it. The lock fd is intentionally never closed.
+    private func acquireInstanceLock() -> Bool {
+        let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+            .appendingPathComponent("ProxySwitch", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let fd = open(dir.appendingPathComponent("app.lock").path, O_CREAT | O_RDWR, 0o644)
+        guard fd >= 0 else { return true }
+        return flock(fd, LOCK_EX | LOCK_NB) == 0
     }
 
     // MARK: Menu Bar
@@ -281,26 +305,31 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSPopoverD
             )
             window.contentView = hostingView
             window.title = "ProxySwitch 设置"
+            // Workaround for a macOS 26/27 crash: the scene-backed status item
+            // over-releases when a settings window closes during a
+            // .regular <-> .accessory activation-policy transition, and when a
+            // restorable window comes back / a closed window deallocs.
+            window.isRestorable = false
+            window.isReleasedWhenClosed = false
             window.center()
             window.delegate = self
             settingsWindow = window
         }
 
-        // Bring to front when in menu-bar-only mode.
-        NSApp.setActivationPolicy(.regular)
+        // Activate so the window can take key status. Deliberately keep the
+        // app at `.accessory`: toggling the activation policy around the
+        // settings window lifecycle is what trips the AppKit over-release.
         settingsWindow?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
     }
 
     // MARK: NSWindowDelegate
 
-    /// Revert to `.accessory` (no Dock icon) when the settings window closes.
+    /// Keep the window alive on close (`isReleasedWhenClosed = false`) and
+    /// keep `.accessory` — no activation-policy churn (see `showSettingsWindow`).
     func windowWillClose(_ notification: Notification) {
         guard let window = notification.object as? NSWindow, window == settingsWindow else { return }
-        settingsWindow = nil
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-            NSApp.setActivationPolicy(.accessory)
-        }
+        window.orderOut(nil)
     }
 
     // MARK: Quit
