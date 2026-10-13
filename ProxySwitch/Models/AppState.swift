@@ -54,11 +54,12 @@ class AppState: ObservableObject {
         profiles.first { $0.id == activeProfileId }
     }
 
-    /// SF Symbol name for the menu bar icon.
+    /// SF Symbol name for the menu bar icon. Always a valid symbol: state is
+    /// conveyed by `menuBarIconColor` instead of variant glyphs, because invalid
+    /// symbol names (e.g. "globe.badge") resolve to nil and make the status item
+    /// image disappear — the menu bar icon looks like it "auto-hides".
     var menuBarIconName: String {
-        if case .unreachable = proxyHealth { return "globe.badge" }
-        if case .reachable(_, functional: false) = proxyHealth { return "globe.badge" }
-        return "globe"
+        "globe"
     }
 
     /// Tint color for the menu bar icon. `nil` means the system default.
