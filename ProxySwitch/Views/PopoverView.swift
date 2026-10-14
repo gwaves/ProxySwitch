@@ -150,7 +150,7 @@ struct PopoverView: View {
 
     private var emptyState: some View {
         VStack(spacing: 8) {
-            Image(systemName: "globe.badge.plus")
+            Image(systemName: "globe")
                 .font(.title2)
                 .foregroundColor(.secondary)
             Text("暂无代理配置")
