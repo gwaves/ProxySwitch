@@ -1,189 +1,165 @@
 import Foundation
+import Darwin
 
-// MARK: - Proxy Traffic Monitor
-
-/// Monitors real-time traffic flowing through the proxy port using `nettop`.
-/// Measures actual bytes passing through proxy connections (not test download speed).
-///
-/// How it works:
-/// 1. Runs `nettop -L -x` to get CSV-formatted connection data with raw byte counts.
-/// 2. Filters connections whose description contains the proxy host:port.
-/// 3. Sums bytes_in + bytes_out across all matching connections.
-/// 4. On the next sample, computes (delta bytes) / (delta time) = bytes/second.
+/// All lifecycle and sample state is managed on the main queue. Only DNS
+/// resolution, pipe reads and parsing run on a utility queue.
 class ProxyTrafficMonitor {
     private var timer: Timer?
-    /// Previous sample: total cumulative bytes and timestamp.
-    private var previousSample: (bytes: Int64, time: Date)?
+    private let executableURL: URL
+    private var interval: TimeInterval
     private var targetProfile: ProxyProfile?
+    private var previousSample: (bytes: Int64, time: TimeInterval)?
+    private var generation: UInt64 = 0
+    private var process: Process?
+    private var timeout: DispatchWorkItem?
+    private var resolvedHosts: Set<String>?
 
     var onSpeedUpdate: ((Double?) -> Void)?
 
-    init(interval: Double = 3) {
-        startMonitoring(interval: interval)
+    init(interval: Double = 15, executableURL: URL = URL(fileURLWithPath: "/usr/bin/nettop")) {
+        self.interval = interval
+        self.executableURL = executableURL
     }
 
     deinit {
         timer?.invalidate()
+        timeout?.cancel()
+        if let process, process.isRunning { process.terminate() }
     }
 
-    /// Updates the target profile and resets the sample baseline.
+    func setInterval(_ interval: TimeInterval) {
+        guard self.interval != interval else { return }
+        self.interval = interval
+        scheduleTimer()
+    }
+
     func updateTarget(profile: ProxyProfile?) {
+        generation &+= 1
         targetProfile = profile
         previousSample = nil
+        resolvedHosts = nil
+        timeout?.cancel()
+        if let process, process.isRunning { process.terminate() }
+        onSpeedUpdate?(nil)
+        scheduleTimer()
         measureNow()
     }
 
-    // MARK: Periodic Monitoring
-
-    private func startMonitoring(interval: Double) {
+    private func scheduleTimer() {
         timer?.invalidate()
+        timer = nil
+        guard targetProfile != nil else { return }
         timer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
             self?.measureNow()
         }
+        timer?.tolerance = interval * 0.1
     }
-
-    // MARK: Measurement
 
     private func measureNow() {
-        guard let profile = targetProfile else {
-            onSpeedUpdate?(nil)
-            return
-        }
-
+        // Keep the old process tracked until its pipe has drained and it exits.
+        guard process == nil, let profile = targetProfile else { return }
+        let generation = self.generation
         let port = profile.type == .socks5 ? (profile.socksPort ?? profile.httpPort) : profile.httpPort
-
-        sampleTraffic(host: profile.host, port: port) { [weak self] totalBytes in
-            guard let self = self else { return }
-
-            let now = Date()
-
-            if let prev = self.previousSample, let current = totalBytes {
-                let dt = now.timeIntervalSince(prev.time)
-                guard dt > 0 else { return }
-
-                let speed: Double
-                if current >= prev.bytes {
-                    speed = Double(current - prev.bytes) / dt
-                } else {
-                    // Connections were reset (disconnected + reconnected), report 0 for this sample
-                    speed = 0
-                }
-                self.onSpeedUpdate?(speed)
-            }
-
-            if let current = totalBytes {
-                self.previousSample = (current, now)
-            }
-        }
-    }
-
-    private func sampleTraffic(host: String, port: Int, completion: @escaping (Int64?) -> Void) {
-        DispatchQueue.global(qos: .utility).async {
-            let total = self.runNettop(host: host, port: port)
-            DispatchQueue.main.async {
-                completion(total)
-            }
-        }
-    }
-
-    // MARK: nettop Runner
-
-    /// Runs `nettop -L 2 -x` to collect 2 CSV samples, then parses proxy-port traffic.
-    /// Uses DispatchGroup + terminationHandler for reliable async waiting.
-    private func runNettop(host: String, port: Int) -> Int64? {
+        let cachedHosts = resolvedHosts
         let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/nettop")
-        process.arguments = ["-L", "2", "-x"]
-
+        process.executableURL = executableURL
+        // One cumulative snapshot is sufficient; our baseline spans invocations.
+        // Numeric addresses avoid reverse DNS; select only the columns we use.
+        process.arguments = ["-L", "1", "-n", "-x", "-J", "bytes_in,bytes_out"]
         let pipe = Pipe()
         process.standardOutput = pipe
-
-        let group = DispatchGroup()
-        group.enter()
-
-        var outputString: String?
-
-        process.terminationHandler = { _ in
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            outputString = String(data: data, encoding: .utf8)
-            group.leave()
-        }
-
+        process.standardError = FileHandle.nullDevice
         do {
             try process.run()
         } catch {
-            group.leave()
-            return nil
+            onSpeedUpdate?(nil)
+            return
         }
+        self.process = process
+        let timeout = DispatchWorkItem {
+            if process.isRunning { process.terminate() }
+        }
+        self.timeout = timeout
+        DispatchQueue.main.asyncAfter(deadline: .now() + 5, execute: timeout)
 
-        // 5-second hard timeout on a separate queue.
-        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 5) {
-            if process.isRunning {
-                process.terminate()
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            // Drain while nettop runs, before waiting for exit, so a full pipe
+            // cannot block the child and force every sample to time out.
+            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            process.waitUntilExit()
+            let now = ProcessInfo.processInfo.systemUptime
+            let hosts = cachedHosts ?? Self.resolveHosts(profile.host)
+            let bytes = process.terminationStatus == 0
+                ? Self.parseNettopOutput(String(decoding: data, as: UTF8.self), hosts: hosts, port: port)
+                : nil
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                timeout.cancel()
+                self.process = nil
+                guard generation == self.generation else {
+                    self.measureNow()
+                    return
+                }
+                self.resolvedHosts = hosts
+                if let bytes {
+                    if let previous = self.previousSample, now > previous.time {
+                        self.onSpeedUpdate?(Double(max(0, bytes - previous.bytes)) / (now - previous.time))
+                    }
+                    self.previousSample = (bytes, now)
+                } else {
+                    self.previousSample = nil
+                    self.onSpeedUpdate?(nil)
+                }
             }
         }
-
-        group.wait()
-
-        guard let output = outputString else { return nil }
-        return parseNettopOutput(output, host: host, port: port)
     }
 
-    // MARK: Output Parser
-
-    /// Parses nettop CSV output and sums bytes_in + bytes_out for connections matching the proxy port.
-    ///
-    /// nettop -L -x CSV format (per line):
-    ///   time,connection_desc,interface,state,bytes_in,bytes_out,...
-    ///
-    /// connection_desc examples:
-    ///   tcp4 10.0.1.6:52272<->192.168.88.234:7890
-    ///   tcp4 127.0.0.1:xxxxx<->127.0.0.1:7890
-    ///   tcp6 *.5900<->*.*
-    private func parseNettopOutput(_ output: String, host: String, port: Int) -> Int64? {
-        var totalBytes: Int64 = 0
-        var foundAny = false
-
-        let portSuffix = ":\(port)"
-        let isLocalhost = (host == "127.0.0.1" || host == "localhost" || host == "::1")
-
-        let lines = output.split(separator: "\n")
-        for line in lines {
-            let fields = line.split(separator: ",", omittingEmptySubsequences: false)
-            // Need at least: time, conn_desc, interface, state, bytes_in, bytes_out
-            guard fields.count >= 6 else { continue }
-
-            // Skip the header line
-            let firstField = String(fields[0]).trimmingCharacters(in: .whitespaces)
-            if firstField == "time" || firstField.hasPrefix("time,") {
-                continue
-            }
-
-            let connDesc = String(fields[1]).trimmingCharacters(in: .whitespaces)
-            let bytesInStr = String(fields[4]).trimmingCharacters(in: .whitespaces)
-            let bytesOutStr = String(fields[5]).trimmingCharacters(in: .whitespaces)
-
-            // Skip process summary lines (they don't have a connection description with <->)
-            guard connDesc.contains("<->") else { continue }
-
-            // Match connections where the description contains the proxy port.
-            // For localhost proxies, any connection ending with :port is likely the proxy.
-            // For remote proxies, the description should contain host:port.
-            let hasPort = connDesc.contains(portSuffix)
-            guard hasPort else { continue }
-
-            // For non-localhost proxies, also verify the host appears in the connection.
-            if !isLocalhost {
-                guard connDesc.contains(host) else { continue }
-            }
-
-            if let bytesIn = Int64(bytesInStr), let bytesOut = Int64(bytesOutStr) {
-                totalBytes += bytesIn + bytesOut
-                foundAny = true
-            }
+    /// Resolve a configured hostname once per target, since nettop emits numeric
+    /// addresses. Never perform reverse DNS for the machine's other connections.
+    private static func resolveHosts(_ host: String) -> Set<String> {
+        var hosts: Set<String> = [host]
+        if ["localhost", "127.0.0.1", "::1"].contains(host) {
+            return ["127.0.0.1", "::1"]
         }
+        var result: UnsafeMutablePointer<addrinfo>?
+        guard getaddrinfo(host, nil, nil, &result) == 0 else { return hosts }
+        defer { if let result { freeaddrinfo(result) } }
+        var current = result
+        while let info = current {
+            var buffer = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+            if getnameinfo(info.pointee.ai_addr, info.pointee.ai_addrlen,
+                           &buffer, socklen_t(buffer.count), nil, 0, NI_NUMERICHOST) == 0 {
+                hosts.insert(String(cString: buffer))
+            }
+            current = info.pointee.ai_next
+        }
+        return hosts
+    }
 
-        return foundAny ? totalBytes : nil
+    /// With -J, nettop emits description,bytes_in,bytes_out (no time column).
+    /// Match complete endpoints so :7890 cannot accidentally match :78901.
+    static func parseNettopOutput(_ output: String, hosts: Set<String>, port: Int) -> Int64? {
+        let endpoints = Set(hosts.flatMap { host in
+            host.contains(":")
+                ? ["\(host):\(port)", "[\(host)]:\(port)", "\(host).\(port)"]
+                : ["\(host):\(port)"]
+        })
+        var total: Int64 = 0
+        for line in output.split(separator: "\n") {
+            let fields = line.split(separator: ",", omittingEmptySubsequences: false)
+            guard fields.count >= 3 else { continue }
+            let description = fields[0].trimmingCharacters(in: .whitespaces)
+            guard let separator = description.range(of: "<->") else { continue }
+            let destination = String(description[separator.upperBound...])
+            // Count the client side only; loopback also has a mirrored server
+            // socket whose source is the proxy port.
+            guard endpoints.contains(destination),
+                  let bytesIn = Int64(fields[1].trimmingCharacters(in: .whitespaces)),
+                  let bytesOut = Int64(fields[2].trimmingCharacters(in: .whitespaces)) else { continue }
+            total += bytesIn + bytesOut
+        }
+        // A successful empty snapshot means idle traffic, not a failed sample.
+        return total
     }
 }
 

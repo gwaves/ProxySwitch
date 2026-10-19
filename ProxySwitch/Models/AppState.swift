@@ -85,6 +85,23 @@ class AppState: ObservableObject {
     /// Real-time traffic monitor for the active proxy port.
     private var trafficMonitor: ProxyTrafficMonitor?
     private var cancellables = Set<AnyCancellable>()
+    private var oneShotChecks: [UUID: HealthCheckOperation] = [:]
+    private var lastAllProfilesCheck: TimeInterval?
+    private var monitoringSettings: MonitoringSettings?
+
+    private struct MonitoringSettings: Equatable {
+        let healthEnabled: Bool
+        let healthInterval: Double
+        let trafficEnabled: Bool
+
+        init() {
+            let defaults = UserDefaults.standard
+            healthEnabled = defaults.object(forKey: "healthCheckEnabled") as? Bool ?? true
+            let interval = defaults.double(forKey: "healthCheckInterval")
+            healthInterval = interval.isFinite && interval >= 10 ? interval : 30
+            trafficEnabled = defaults.object(forKey: "trafficMonitoringEnabled") as? Bool ?? true
+        }
+    }
 
     // MARK: Auto-disable / auto-re-enable tracking
 
@@ -98,12 +115,14 @@ class AppState: ObservableObject {
 
     init() {
         loadState()
-        setupHealthChecker()
         setupTrafficMonitor()
-        // Check all profiles on launch so each row shows its health immediately.
-        checkAllProfiles()
+        applyMonitoringSettings()
         observeProfileHealths()
         observeProxyHealthForAutoReenable()
+        NotificationCenter.default.publisher(for: UserDefaults.didChangeNotification)
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in self?.applyMonitoringSettings() }
+            .store(in: &cancellables)
     }
 
     // MARK: State Restoration
@@ -122,47 +141,70 @@ class AppState: ObservableObject {
     // MARK: Periodic Health Checker
 
     /// Sets up the timer-based checker that monitors the *active* profile.
-    private func setupHealthChecker() {
-        let interval = UserDefaults.standard.double(forKey: "healthCheckInterval")
-        healthChecker = ProxyHealthChecker(interval: interval > 0 ? interval : 30)
-        healthChecker?.onStatusChange = { [weak self] health in
-            Task { @MainActor in
-                self?.proxyHealth = health
-                if let activeId = self?.activeProfileId {
-                    self?.profileHealths[activeId] = health
+    private func applyMonitoringSettings() {
+        let settings = MonitoringSettings()
+        let previous = monitoringSettings
+        guard previous != settings else { return }
+        monitoringSettings = settings
+        if previous?.healthEnabled != settings.healthEnabled || previous?.healthInterval != settings.healthInterval {
+            healthChecker?.stop()
+            healthChecker = nil
+            for check in oneShotChecks.values { check.cancel() }
+            oneShotChecks.removeAll()
+            lastAllProfilesCheck = nil
+            if settings.healthEnabled {
+                setupHealthChecker(interval: settings.healthInterval)
+                for profile in profiles where profile.id != activeProfileId {
+                    checkProfileHealth(profile)
                 }
-                // If the active profile becomes unreachable, re-check all profiles
-                // so we can determine whether every proxy is down.
-                if case .unreachable = health {
-                    self?.checkAllProfiles()
-                }
+            } else {
+                proxyHealth = .unknown
+                profileHealths = [:]
             }
         }
+        if previous?.trafficEnabled != settings.trafficEnabled {
+            updateTrafficMonitorTarget()
+        }
+    }
+
+    private func setupHealthChecker(interval: Double) {
+        healthChecker = ProxyHealthChecker(interval: interval)
+        healthChecker?.onStatusChange = { [weak self] health in
+            self?.proxyHealth = health
+            if let activeId = self?.activeProfileId {
+                self?.profileHealths[activeId] = health
+            }
+            if case .unreachable = health {
+                self?.checkAllProfiles()
+            }
+        }
+        healthChecker?.updateTarget(profile: activeProfile)
     }
 
     // MARK: Traffic Monitor
 
     /// Sets up the real-time traffic monitor for the active proxy port.
     private func setupTrafficMonitor() {
-        trafficMonitor = ProxyTrafficMonitor(interval: 3)
+        trafficMonitor = ProxyTrafficMonitor(interval: 15)
         trafficMonitor?.onSpeedUpdate = { [weak self] speed in
-            Task { @MainActor in
-                self?.trafficSpeed = speed
-            }
+            self?.trafficSpeed = speed
         }
-        // Start monitoring if a profile is already active and proxy is enabled.
-        updateTrafficMonitorTarget()
     }
 
     /// Starts or stops traffic monitoring based on whether any proxy is enabled.
     private func updateTrafficMonitorTarget() {
         let anyProxyEnabled = systemProxyEnabled || terminalProxyEnabled
-        if anyProxyEnabled, let profile = activeProfile {
+        let trafficEnabled = UserDefaults.standard.object(forKey: "trafficMonitoringEnabled") as? Bool ?? true
+        if trafficEnabled, anyProxyEnabled, let profile = activeProfile {
             trafficMonitor?.updateTarget(profile: profile)
         } else {
             trafficMonitor?.updateTarget(profile: nil)
             trafficSpeed = nil
         }
+    }
+
+    func setPopoverVisible(_ visible: Bool) {
+        trafficMonitor?.setInterval(visible ? 3 : 15)
     }
 
     // MARK: Auto Disable
@@ -237,6 +279,7 @@ class AppState: ObservableObject {
     /// Switches the active profile and applies it to any enabled proxy channels.
     func activateProfile(_ profile: ProxyProfile) {
         clearAutoDisableTracking()
+        oneShotChecks.removeValue(forKey: profile.id)?.cancel()
         activeProfileId = profile.id
 
         // Snapshot the toggles before dispatching to a background thread.
@@ -263,7 +306,12 @@ class AppState: ObservableObject {
 
     /// Checks connectivity for every saved profile (used on launch and on demand).
     func checkAllProfiles() {
-        for profile in profiles {
+        // Repeated failures must not fan out into a full scan every cycle.
+        let now = ProcessInfo.processInfo.systemUptime
+        let minimumInterval = max(60, monitoringSettings?.healthInterval ?? 30)
+        if let lastAllProfilesCheck, now - lastAllProfilesCheck < minimumInterval { return }
+        lastAllProfilesCheck = now
+        for profile in profiles where profile.id != activeProfileId {
             checkProfileHealth(profile)
         }
     }
@@ -271,17 +319,16 @@ class AppState: ObservableObject {
     /// Checks a single profile's connectivity by sending an HTTP request through it.
     private func checkProfileHealth(_ profile: ProxyProfile) {
         let id = profile.id
+        guard oneShotChecks[id] == nil else { return }
         profileHealths[id] = .checking
 
         let testUrl = UserDefaults.standard.string(forKey: "proxyTestUrl") ?? "https://www.google.com"
 
-        ProxyHealthChecker.checkOnce(profile: profile, testUrl: testUrl) { [weak self] health in
-            Task { @MainActor in
-                self?.profileHealths[id] = health
-                // Keep the active-profile health in sync for the menu bar icon.
-                if id == self?.activeProfileId {
-                    self?.proxyHealth = health
-                }
+        oneShotChecks[id] = ProxyHealthChecker.checkOnce(profile: profile, testUrl: testUrl) { [weak self] health in
+            self?.oneShotChecks.removeValue(forKey: id)
+            self?.profileHealths[id] = health
+            if id == self?.activeProfileId {
+                self?.proxyHealth = health
             }
         }
     }
@@ -353,10 +400,13 @@ class AppState: ObservableObject {
         if profiles.count == 1 {
             activateProfile(profile)
         }
-        checkProfileHealth(profile)
+        if activeProfileId != profile.id || healthChecker == nil {
+            checkProfileHealth(profile)
+        }
     }
 
     func updateProfile(_ profile: ProxyProfile) {
+        oneShotChecks.removeValue(forKey: profile.id)?.cancel()
         if let index = profiles.firstIndex(where: { $0.id == profile.id }) {
             profiles[index] = profile
         }
@@ -364,15 +414,20 @@ class AppState: ObservableObject {
         if activeProfileId == profile.id {
             activateProfile(profile)
         }
-        checkProfileHealth(profile)
+        if activeProfileId != profile.id || healthChecker == nil {
+            checkProfileHealth(profile)
+        }
     }
 
     func deleteProfile(_ profile: ProxyProfile) {
+        oneShotChecks.removeValue(forKey: profile.id)?.cancel()
         profiles.removeAll { $0.id == profile.id }
         profileHealths.removeValue(forKey: profile.id)
         // Fall back to the first remaining profile.
         if activeProfileId == profile.id {
             activeProfileId = profiles.first?.id
+            healthChecker?.updateTarget(profile: activeProfile)
+            updateTrafficMonitorTarget()
         }
     }
 }

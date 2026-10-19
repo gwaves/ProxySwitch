@@ -115,9 +115,19 @@ On disable, the entire block is removed. On re-enable, the old block is replaced
 
 ### Health Check / 健康检测
 
-Uses Apple's `Network` framework (`NWConnection` TCP) to test proxy reachability. A generation counter ensures stale in-flight checks are silently discarded when a new check starts or the target changes. Latency is measured from connection start to the `.ready` state.
+Uses Apple's `Network` framework (`NWConnection` TCP) to measure connection latency, followed by a HEAD request through the proxy. Turning off automatic checks cancels pending work; changing the interval takes effect immediately. Manual checks remain available. Full scans after an active proxy failure are limited to once per minute (or the configured interval, if longer).
 
-使用 Apple `Network` 框架（`NWConnection` TCP）检测代理连通性。代计数器确保当新检测开始或目标变更时，过期的在途检测被静默丢弃。延迟从连接开始到 `.ready` 状态计算。
+使用 `NWConnection` 测量 TCP 连接延迟，再通过代理发送 HEAD 请求。自动检测开关和间隔即时生效，关闭时取消在途任务，仍可手动检测。活动代理失败后，对其他配置的全量复查最多每分钟一次（检测间隔更长时按该间隔）。
+
+### Traffic Monitoring / 流量监控
+
+Traffic sampling uses a single numeric-address `nettop` snapshot with only byte counters. Samples never overlap, and output is drained while the process runs. Refresh is every 15 seconds in the background and every 3 seconds while the menu is open. Disable **显示代理流量** in General settings to stop traffic sampling entirely. No traffic timer runs when proxies or traffic monitoring are off.
+
+流量采样使用 `nettop` 单次快照，禁用反向 DNS，仅收集字节计数，采样不重叠并及时读取输出。后台每 15 秒更新，打开菜单时每 3 秒更新。关闭通用设置中的「显示代理流量」后完全停止流量采样；代理全部关闭时也不运行流量定时器。
+
+### Regression Checks / 回归检查
+
+Run `Tests/run.sh` on macOS with the Swift command line tools. It checks CSV parsing, pipe draining, sample overlap, cancellation, target changes, and live health settings without changing system proxy or shell settings.
 
 ---
 

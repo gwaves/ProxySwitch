@@ -7,6 +7,7 @@ import ServiceManagement
 /// Uses `@AppStorage` for persistence so changes are saved automatically.
 struct SettingsView: View {
     @AppStorage("launchAtLogin") private var launchAtLogin = false
+    @AppStorage("trafficMonitoringEnabled") private var trafficMonitoringEnabled = true
     @AppStorage("healthCheckEnabled") private var healthCheckEnabled = true
     @AppStorage("healthCheckInterval") private var healthCheckInterval = 30.0
     @AppStorage("proxyTestUrl") private var proxyTestUrl = "https://www.google.com"
@@ -35,6 +36,10 @@ struct SettingsView: View {
                 .onChange(of: launchAtLogin) { newValue in
                     setLaunchAtLogin(newValue)
                 }
+            Toggle("显示代理流量", isOn: $trafficMonitoringEnabled)
+            Text("后台每 15 秒更新，打开菜单时每 3 秒更新；关闭后停止流量采样。")
+                .font(.caption)
+                .foregroundColor(.secondary)
         }
         .formStyle(.grouped)
         .padding()

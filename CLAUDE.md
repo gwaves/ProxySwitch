@@ -26,7 +26,7 @@ xcodebuild -project ProxySwitch.xcodeproj \
 
 The built app is at `build/Build/Products/Release/ProxySwitch.app`.
 
-There are currently no unit/UI tests in the repo. Testing is manual: build and run the app from Xcode or open the built `.app`.
+Run `Tests/run.sh` for standalone Swift regression checks of monitoring and live health settings. State checks use in-memory profile and proxy-manager stubs, so they never change system proxy or shell settings. UI testing is manual: build and run the app from Xcode or open the built `.app`.
 
 Regenerate icons (requires Python 3 + Pillow):
 
@@ -55,12 +55,12 @@ python generate_menubar_icon.py
 
 - `SystemProxyManager` wraps `/usr/sbin/networksetup`. It discovers non-disabled network services and applies HTTP/HTTPS/SOCKS proxy settings to all of them. Calls are dispatched to a background queue from `AppState`.
 - `TerminalProxyManager` reads/writes a marker-delimited block in the shell config file (default `~/.zshrc`, overridable via the `shellConfigPath` setting). Edits are idempotent: the old block is removed before the new one is appended.
-- `ProxyHealthChecker` performs two-phase health checks: (1) TCP connect latency via `NWConnection`, then (2) a HEAD request through the proxy to the configured test URL. It uses a generation counter to discard stale in-flight results when the target profile or interval changes.
-- `ProxyTrafficMonitor` runs `/usr/bin/nettop -L 2 -x` on a timer, parses CSV output, and sums bytes for connections matching the active proxy host:port to compute real-time bytes/second.
+- `ProxyHealthChecker` performs two-phase health checks: (1) TCP connect latency via `NWConnection`, then (2) a HEAD request through the proxy to the configured test URL. A cancellable `HealthCheckOperation` owns both phases; callbacks and cancellation run on the main queue. Settings changes rebuild or stop the periodic checker immediately.
+- `ProxyTrafficMonitor` runs `/usr/bin/nettop -L 1 -n -x -J bytes_in,bytes_out` without overlapping processes, drains output before waiting for exit, and parses client-side endpoints. It samples every 15 seconds in the background and every 3 seconds while the popover is open; disabling traffic monitoring or both proxy channels stops its timer. A generation counter rejects stale traffic results.
 
 ### Health-check flow
 
-- On launch, `AppState.checkAllProfiles()` checks every saved profile once.
+- When automatic checks are enabled, startup checks the active profile and each other saved profile once. `checkAllProfiles()` refreshes the other profiles after active-profile failures, throttled to at least 60 seconds and deduplicated against in-flight checks.
 - A periodic `ProxyHealthChecker` instance monitors only the *active* profile and updates `AppState.proxyHealth` (which drives the menu-bar icon color).
 - Per-profile health is stored in `AppState.profileHealths` so each row in the list shows its own status.
 - If the active profile becomes unreachable, `AppState` re-checks all profiles.
@@ -84,7 +84,8 @@ These `UserDefaults` keys are used across the app and should be kept in sync wit
 - `launchAtLogin` — registered via `SMAppService`.
 - `activeProfileId` — UUID string of the currently active profile.
 - `systemProxyEnabled`, `terminalProxyEnabled` — current toggle states.
-- `healthCheckEnabled`, `healthCheckInterval` — periodic health check settings.
+- `healthCheckEnabled`, `healthCheckInterval` — periodic health check settings, applied live.
+- `trafficMonitoringEnabled` — enables traffic sampling and speed display (default true).
 - `proxyTestUrl` — URL used for the functional HEAD request (default `https://www.google.com`).
 - `autoDisableWhenAllUnreachable` — disables all proxies when every profile is unreachable.
 - `shellConfigPath` — custom path for the terminal proxy block; empty means `~/.zshrc`.

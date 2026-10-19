@@ -187,10 +187,12 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSPopoverD
     // MARK: NSPopoverDelegate
 
     func popoverDidShow(_ notification: Notification) {
+        appState.setPopoverVisible(true)
         startGlobalEventMonitor()
     }
 
     func popoverDidClose(_ notification: Notification) {
+        appState.setPopoverVisible(false)
         stopGlobalEventMonitor()
     }
 
