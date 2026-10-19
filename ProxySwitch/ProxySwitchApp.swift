@@ -20,12 +20,14 @@ struct ProxySwitchApp: App {
 
 /// Manages the status bar item, popover, and settings window lifecycle.
 class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSPopoverDelegate {
-    let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+    let statusItem = NSStatusBar.system.statusItem(withLength: MenuBarStatusView.iconOnlyWidth)
     let popover = NSPopover()
     let appState = AppState.shared
     var settingsWindow: NSWindow?
     private var speedCancellable: AnyCancellable?
     private var menuBarCancellables = Set<AnyCancellable>()
+    private let menuBarView = MenuBarStatusView(frame: .zero)
+    private var menuBarImage: NSImage?
     private var lastMenuBarSymbol: String?
     private var lastMenuBarColor: NSColor?
     private var globalEventMonitor: Any?
@@ -73,8 +75,12 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSPopoverD
 
     private func setupMenuBar() {
         if let button = statusItem.button {
-            button.image = NSImage(systemSymbolName: "globe", accessibilityDescription: "ProxySwitch")
-            button.image?.size = NSSize(width: 18, height: 18)
+            button.image = nil
+            button.title = ""
+            menuBarView.frame = button.bounds
+            menuBarView.autoresizingMask = [.width, .height]
+            button.addSubview(menuBarView)
+            button.setAccessibilityLabel("ProxySwitch")
             button.action = #selector(statusBarClicked)
             button.target = self
             // Handle both left-click (popover) and right-click (context menu)
@@ -91,19 +97,13 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSPopoverD
         let symbolName = appState.menuBarIconName
         let color = appState.menuBarIconColor
         let anyProxyEnabled = appState.systemProxyEnabled || appState.terminalProxyEnabled
-        let newTitle: String
-        if anyProxyEnabled, let speed = appState.trafficSpeed, speed > 0 {
-            newTitle = " " + speed.trafficMenuBarString
-        } else {
-            newTitle = ""
-        }
-
-        // Only mutate UI if something actually changed — avoids AppKit animation crashes.
-        let currentTitle = button.title
+        let trafficEnabled = UserDefaults.standard.object(forKey: "trafficMonitoringEnabled") as? Bool ?? true
+        let showsTraffic = anyProxyEnabled && trafficEnabled
+        // Keep the slot present through idle periods and pending samples.
+        let speed = appState.trafficSpeed
+        let newTitle = speed.map { $0.trafficMenuBarString } ?? "—"
+        let width = showsTraffic ? MenuBarStatusView.trafficWidth : MenuBarStatusView.iconOnlyWidth
         let needsImageUpdate = !imageMatches(symbolName: symbolName, color: color)
-        let needsTitleUpdate = currentTitle != newTitle
-
-        guard needsImageUpdate || needsTitleUpdate else { return }
 
         // Disable implicit animations during the update.
         CATransaction.begin()
@@ -117,14 +117,16 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSPopoverD
                     NSImage.SymbolConfiguration(paletteColors: [color])
                 )
             }
-            button.image = image
+            menuBarImage = image
             lastMenuBarSymbol = symbolName
             lastMenuBarColor = color
         }
 
-        if needsTitleUpdate {
-            button.title = newTitle
-        }
+        if statusItem.length != width { statusItem.length = width }
+        menuBarView.update(image: menuBarImage, title: newTitle, showsTraffic: showsTraffic)
+        let description = showsTraffic ? "ProxySwitch，代理流量：" + (speed?.trafficFullString ?? "等待采样") : "ProxySwitch"
+        button.toolTip = description
+        button.setAccessibilityValue(description)
 
         CATransaction.commit()
     }
@@ -147,6 +149,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSPopoverD
             .sink { [weak self] _ in
                 self?.updateMenuBarAppearance()
             }
+
+        NotificationCenter.default.publisher(for: UserDefaults.didChangeNotification)
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in self?.updateMenuBarAppearance() }
+            .store(in: &menuBarCancellables)
 
         // Also update appearance when proxy health or enabled state changes (affects icon color)
         appState.$proxyHealth
