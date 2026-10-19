@@ -166,15 +166,19 @@ class ProxyTrafficMonitor {
 // MARK: - Traffic Speed Formatting
 
 extension Double {
-    /// Concise format for menu bar: ↓1.2M, ↓856K, ↓12.5M
+    /// Bounded labels fit the fixed menu-bar slot, including gigabyte rates.
     var trafficMenuBarString: String {
-        if self >= 1_000_000 {
-            return String(format: "↓%.1fM", self / 1_000_000)
-        } else if self >= 1_000 {
-            return String(format: "↓%.0fK", self / 1_000)
-        } else {
-            return String(format: "↓%.0fB", self)
+        guard isFinite else { return "—" }
+        let speed = max(0, self)
+        if speed >= 1_000_000_000_000_000 { return "↓999T+" }
+        for (scale, unit) in [(1e12, "T"), (1e9, "G"), (1e6, "M")] where speed >= scale {
+            let value = speed / scale
+            return String(format: value >= 100 ? "↓%.0f%@" : "↓%.1f%@", value, unit)
         }
+        if speed >= 1_000 {
+            return String(format: "↓%.0fK", speed / 1_000)
+        }
+        return String(format: "↓%.0fB", speed)
     }
 
     /// Full readable format: 1.2 MB/s, 856 KB/s, 12.5 MB/s
