@@ -6,6 +6,7 @@ import SwiftUI
 /// Layout: header → system/terminal toggles → profile list → add button.
 struct PopoverView: View {
     @EnvironmentObject var appState: AppState
+    @AppStorage("trafficMonitoringEnabled") private var trafficMonitoringEnabled = true
     @State private var showAddProfile = false
     @State private var editingProfile: ProxyProfile?
 
@@ -64,7 +65,7 @@ struct PopoverView: View {
     @ViewBuilder
     private var trafficSection: some View {
         let anyProxyEnabled = appState.systemProxyEnabled || appState.terminalProxyEnabled
-        if anyProxyEnabled {
+        if anyProxyEnabled && trafficMonitoringEnabled {
             HStack {
                 Image(systemName: "arrow.down.arrow.up")
                     .foregroundColor(.secondary)
