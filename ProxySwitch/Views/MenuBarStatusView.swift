@@ -18,6 +18,13 @@ final class MenuBarStatusView: NSView {
         speedLabel.lineBreakMode = .byTruncatingTail
         iconView.setAccessibilityElement(false)
         speedLabel.setAccessibilityElement(false)
+        // Both slots have fixed widths. Flexible top and bottom margins keep
+        // them centered when the menu bar height changes.
+        iconView.frame = NSRect(x: 6, y: bounds.midY - 9, width: 18, height: 18)
+        let height = speedLabel.intrinsicContentSize.height
+        speedLabel.frame = NSRect(x: 29, y: bounds.midY - height / 2, width: 58, height: height)
+        iconView.autoresizingMask = [.minYMargin, .maxYMargin]
+        speedLabel.autoresizingMask = [.minYMargin, .maxYMargin]
         addSubview(iconView)
         addSubview(speedLabel)
     }
@@ -26,17 +33,11 @@ final class MenuBarStatusView: NSView {
 
     func update(image: NSImage?, title: String, showsTraffic: Bool) {
         if iconView.image !== image { iconView.image = image }
-        if speedLabel.stringValue != title { speedLabel.stringValue = title }
-        speedLabel.isHidden = !showsTraffic
-        needsLayout = true
-    }
-
-    override func layout() {
-        super.layout()
-        iconView.frame = NSRect(x: 6, y: (bounds.height - 18) / 2, width: 18, height: 18)
-        let labelHeight = speedLabel.intrinsicContentSize.height
-        speedLabel.frame = NSRect(x: 29, y: (bounds.height - labelHeight) / 2,
-                                 width: 58, height: labelHeight)
+        if showsTraffic && speedLabel.stringValue != title { speedLabel.stringValue = title }
+        let hideLabel = !showsTraffic
+        if speedLabel.isHidden != hideLabel {
+            speedLabel.isHidden = hideLabel
+        }
     }
 
     override func hitTest(_ point: NSPoint) -> NSView? { nil }
