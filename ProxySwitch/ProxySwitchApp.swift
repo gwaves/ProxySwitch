@@ -20,16 +20,15 @@ struct ProxySwitchApp: App {
 
 /// Manages the status bar item, popover, and settings window lifecycle.
 class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSPopoverDelegate {
-    let statusItem = NSStatusBar.system.statusItem(withLength: MenuBarStatusView.iconOnlyWidth)
+    let statusItem = NSStatusBar.system.statusItem(withLength: MenuBarStatusImage.iconOnlyWidth)
     let popover = NSPopover()
     let appState = AppState.shared
     var settingsWindow: NSWindow?
     private var speedCancellable: AnyCancellable?
     private var menuBarCancellables = Set<AnyCancellable>()
-    private let menuBarView = MenuBarStatusView(frame: .zero)
-    private var menuBarImage: NSImage?
     private var lastMenuBarSymbol: String?
     private var lastMenuBarColor: NSColor?
+    private var lastMenuBarTitle: String?
     private var globalEventMonitor: Any?
 
     // MARK: Launch
@@ -75,16 +74,17 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSPopoverD
 
     private func setupMenuBar() {
         if let button = statusItem.button {
-            button.image = nil
-            button.title = ""
-            menuBarView.frame = button.bounds
-            menuBarView.autoresizingMask = [.width, .height]
-            button.addSubview(menuBarView)
+            button.imagePosition = .imageOnly
             button.setAccessibilityLabel("ProxySwitch")
             button.action = #selector(statusBarClicked)
             button.target = self
             // Handle both left-click (popover) and right-click (context menu)
             button.sendAction(on: [.leftMouseUp, .rightMouseUp])
+            #if compiler(>=6.4)
+            if #available(macOS 27, *) {
+                statusItem.expandedInterfaceDelegate = self
+            }
+            #endif
             updateMenuBarAppearance()
         }
     }
@@ -101,32 +101,27 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSPopoverD
         let showsTraffic = anyProxyEnabled && trafficEnabled
         // Keep the slot present through idle periods and pending samples.
         let speed = appState.trafficSpeed
-        let newTitle = speed.map { $0.trafficMenuBarString } ?? "—"
-        let width = showsTraffic ? MenuBarStatusView.trafficWidth : MenuBarStatusView.iconOnlyWidth
-        let needsImageUpdate = !imageMatches(symbolName: symbolName, color: color)
+        let newTitle = showsTraffic ? (speed?.trafficMenuBarString ?? "—") : nil
+        let width = showsTraffic ? MenuBarStatusImage.trafficWidth : MenuBarStatusImage.iconOnlyWidth
+        let needsImageUpdate = lastMenuBarTitle != newTitle || !imageMatches(symbolName: symbolName, color: color)
+        let description = showsTraffic ? "ProxySwitch，代理流量：" + (speed?.trafficFullString ?? "等待采样") : "ProxySwitch"
 
         // Disable implicit animations during the update.
         CATransaction.begin()
         CATransaction.setDisableActions(true)
 
         if needsImageUpdate {
-            var image = NSImage(systemSymbolName: symbolName, accessibilityDescription: "ProxySwitch")
-            image?.size = NSSize(width: 18, height: 18)
-            if let color = color {
-                image = image?.withSymbolConfiguration(
-                    NSImage.SymbolConfiguration(paletteColors: [color])
-                )
-            }
-            menuBarImage = image
+            button.image = MenuBarStatusImage.make(symbolName: symbolName, color: color, title: newTitle)
             lastMenuBarSymbol = symbolName
             lastMenuBarColor = color
+            lastMenuBarTitle = newTitle
         }
 
         if statusItem.length != width { statusItem.length = width }
-        menuBarView.update(image: menuBarImage, title: newTitle, showsTraffic: showsTraffic)
-        let description = showsTraffic ? "ProxySwitch，代理流量：" + (speed?.trafficFullString ?? "等待采样") : "ProxySwitch"
-        button.toolTip = description
-        button.setAccessibilityValue(description)
+        if button.toolTip != description {
+            button.toolTip = description
+            button.setAccessibilityValue(description)
+        }
 
         CATransaction.commit()
     }
@@ -201,6 +196,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSPopoverD
     func popoverDidClose(_ notification: Notification) {
         appState.setPopoverVisible(false)
         stopGlobalEventMonitor()
+        #if compiler(>=6.4)
+        if #available(macOS 27, *) {
+            statusItem.expandedInterfaceSession?.cancel()
+        }
+        #endif
     }
 
     /// Closes the popover when the user clicks outside of it (including on other apps' windows).
@@ -227,9 +227,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSPopoverD
     // MARK: Click Handling
 
     @objc private func statusBarClicked() {
-        guard let event = NSApp.currentEvent else { return }
-
-        if event.type == .rightMouseUp {
+        if NSApp.currentEvent?.type == .rightMouseUp {
             showRightClickMenu()
         } else {
             togglePopover()
@@ -354,6 +352,21 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSPopoverD
         NSApp.setActivationPolicy(.accessory)
     }
 }
+
+#if compiler(>=6.4)
+@available(macOS 27, *)
+extension AppDelegate: NSStatusItemExpandedInterfaceDelegate {
+    func statusItem(_ statusItem: NSStatusItem, didBegin session: NSStatusItemExpandedInterfaceSession) {
+        if !popover.isShown {
+            togglePopover()
+        }
+    }
+
+    func statusItemDidEndExpandedInterfaceSession(_ statusItem: NSStatusItem, animated: Bool) {
+        closePopover()
+    }
+}
+#endif
 
 // MARK: - Helper
 
